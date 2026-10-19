@@ -104,6 +104,7 @@ class LibraryItemController {
    * GET: /api/items/:id/tracks
    * Lightweight list of the audio tracks to play and the user's progress, for clients that can't handle the
    * size of the full item (e.g. smartwatches, which limit web responses to roughly 32 KB).
+   * Responds 404 when there is nothing to play (no audio tracks, or a podcast episode without an audio file).
    * Optional query params:
    * ?episode=<episodeId> (required for podcasts)
    *
@@ -118,14 +119,22 @@ class LibraryItemController {
     if (libraryItem.isPodcast) {
       episodeId = typeof req.query.episode === 'string' ? req.query.episode : null
       if (!episodeId) {
+        Logger.error(`[LibraryItemController] getTracks: Query param "episode" is required for podcast "${libraryItem.id}"`)
         return res.status(400).send('Query param "episode" is required for podcasts')
       }
-      if (!libraryItem.media.podcastEpisodes.some((ep) => ep.id === episodeId)) {
+      const episode = libraryItem.media.podcastEpisodes.find((ep) => ep.id === episodeId)
+      if (!episode?.audioFile) {
+        Logger.error(`[LibraryItemController] getTracks: Episode "${episodeId}" not found or has no audio file`)
         return res.sendStatus(404)
       }
       tracks = libraryItem.media.getTracklist(libraryItem.id, episodeId)
     } else {
       tracks = libraryItem.media.getTracklist(libraryItem.id)
+    }
+
+    if (!tracks.length) {
+      Logger.error(`[LibraryItemController] getTracks: Library item "${libraryItem.id}" has no audio tracks`)
+      return res.sendStatus(404)
     }
 
     const progress = req.user.getOldMediaProgress(libraryItem.id, episodeId)
@@ -135,12 +144,14 @@ class LibraryItemController {
       mediaType: libraryItem.mediaType,
       episodeId,
       title: libraryItem.media.getPlaybackTitle(episodeId),
-      author: libraryItem.media.getPlaybackAuthor(),
-      duration: libraryItem.media.getPlaybackDuration(episodeId),
+      author: libraryItem.media.getPlaybackAuthor() || '',
+      // Sum of the returned tracks (excluded audio files are not counted), so it matches the last track's end
+      duration: tracks.reduce((total, track) => total + (track.duration || 0), 0),
       progress: progress
         ? {
             currentTime: progress.currentTime,
             duration: progress.duration,
+            progress: progress.progress,
             isFinished: progress.isFinished,
             lastUpdate: progress.lastUpdate
           }

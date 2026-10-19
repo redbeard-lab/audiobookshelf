@@ -346,7 +346,7 @@ describe('LibraryItemController', () => {
 
     it('returns only the tracks, offsets and progress for a book', async () => {
       const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
-      const progress = { currentTime: 120, duration: 300, isFinished: false, lastUpdate: 1234, ebookProgress: 0 }
+      const progress = { currentTime: 120, duration: 300, progress: 0.4, isFinished: false, lastUpdate: 1234, ebookProgress: 0 }
       const req = { libraryItem, query: {}, user: fakeUser(progress) }
       const res = fakeRes()
 
@@ -354,8 +354,9 @@ describe('LibraryItemController', () => {
 
       expect(res.json.calledOnce).to.be.true
       const payload = res.json.firstCall.args[0]
-      expect(payload).to.deep.include({ id: bookItemId, mediaType: 'book', episodeId: null, title: 'Long Book', author: 'Some Author' })
-      expect(payload.progress).to.deep.equal({ currentTime: 120, duration: 300, isFinished: false, lastUpdate: 1234 })
+      // duration counts only the returned tracks, not the excluded 50 s file
+      expect(payload).to.deep.include({ id: bookItemId, mediaType: 'book', episodeId: null, title: 'Long Book', author: 'Some Author', duration: 300 })
+      expect(payload.progress).to.deep.equal({ currentTime: 120, duration: 300, progress: 0.4, isFinished: false, lastUpdate: 1234 })
       expect(payload.tracks).to.deep.equal([
         { index: 1, ino: '101', startOffset: 0, duration: 100, mimeType: 'audio/mp4', ext: '.m4b', contentUrl: `/api/items/${bookItemId}/file/101` },
         { index: 3, ino: '103', startOffset: 100, duration: 200, mimeType: 'audio/mp4', ext: '.m4b', contentUrl: `/api/items/${bookItemId}/file/103` }
@@ -384,6 +385,36 @@ describe('LibraryItemController', () => {
       expect(payload).to.deep.include({ id: podcastItemId, mediaType: 'podcast', episodeId, title: 'Episode 1', author: 'Host', duration: 300 })
       expect(payload.tracks).to.deep.equal([{ index: 1, ino: '201', startOffset: 0, duration: 300, mimeType: 'audio/mp4', ext: '.m4b', contentUrl: `/api/items/${podcastItemId}/file/201` }])
       expect(req.user.getOldMediaProgress.calledWith(podcastItemId, episodeId)).to.be.true
+    })
+
+    it('responds 404 for an item with nothing to play', async () => {
+      const library = await Database.libraryModel.findOne({ where: { name: 'Books' } })
+      const folder = await Database.libraryFolderModel.findOne({ where: { libraryId: library.id } })
+      const ebookOnly = await Database.bookModel.create({ title: 'Ebook only', audioFiles: [], chapters: [], tags: [], narrators: [], genres: [] })
+      const item = await Database.libraryItemModel.create({ libraryFiles: [], mediaId: ebookOnly.id, mediaType: 'book', libraryId: library.id, libraryFolderId: folder.id })
+      const libraryItem = await Database.libraryItemModel.getExpandedById(item.id)
+      const res = fakeRes()
+      await LibraryItemController.getTracks.bind(apiRouter)({ libraryItem, query: {}, user: fakeUser() }, res)
+      expect(res.sendStatus.calledWith(404)).to.be.true
+      expect(res.json.called).to.be.false
+    })
+
+    it('responds 404 for a podcast episode without an audio file', async () => {
+      const podcastItem = await Database.libraryItemModel.getExpandedById(podcastItemId)
+      const noAudio = await Database.podcastEpisodeModel.create({ podcastId: podcastItem.media.id, title: 'No audio', audioFile: null, chapters: [] })
+      const libraryItem = await Database.libraryItemModel.getExpandedById(podcastItemId)
+      const res = fakeRes()
+      await LibraryItemController.getTracks.bind(apiRouter)({ libraryItem, query: { episode: noAudio.id }, user: fakeUser() }, res)
+      expect(res.sendStatus.calledWith(404)).to.be.true
+    })
+
+    it('is behind the item access check', async () => {
+      const req = { params: { id: bookItemId }, path: `/items/${bookItemId}/tracks`, method: 'GET', user: { checkCanAccessLibraryItem: () => false } }
+      const res = fakeRes()
+      const next = sinon.spy()
+      await LibraryItemController.middleware.bind(apiRouter)(req, res, next)
+      expect(res.sendStatus.calledWith(403)).to.be.true
+      expect(next.called).to.be.false
     })
 
     it('requires a valid episode for podcasts', async () => {
