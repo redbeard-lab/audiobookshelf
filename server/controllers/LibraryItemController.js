@@ -101,6 +101,63 @@ class LibraryItemController {
   }
 
   /**
+   * GET: /api/items/:id/tracks
+   * Lightweight list of the audio tracks to play and the user's progress, for clients that can't handle the
+   * size of the full item (e.g. smartwatches, which limit web responses to roughly 32 KB).
+   * Optional query params:
+   * ?episode=<episodeId> (required for podcasts)
+   *
+   * @param {LibraryItemControllerRequest} req
+   * @param {Response} res
+   */
+  async getTracks(req, res) {
+    const libraryItem = req.libraryItem
+    let episodeId = null
+    let tracks = []
+
+    if (libraryItem.isPodcast) {
+      episodeId = typeof req.query.episode === 'string' ? req.query.episode : null
+      if (!episodeId) {
+        return res.status(400).send('Query param "episode" is required for podcasts')
+      }
+      if (!libraryItem.media.podcastEpisodes.some((ep) => ep.id === episodeId)) {
+        return res.sendStatus(404)
+      }
+      tracks = libraryItem.media.getTracklist(libraryItem.id, episodeId)
+    } else {
+      tracks = libraryItem.media.getTracklist(libraryItem.id)
+    }
+
+    const progress = req.user.getOldMediaProgress(libraryItem.id, episodeId)
+
+    res.json({
+      id: libraryItem.id,
+      mediaType: libraryItem.mediaType,
+      episodeId,
+      title: libraryItem.media.getPlaybackTitle(episodeId),
+      author: libraryItem.media.getPlaybackAuthor(),
+      duration: libraryItem.media.getPlaybackDuration(episodeId),
+      progress: progress
+        ? {
+            currentTime: progress.currentTime,
+            duration: progress.duration,
+            isFinished: progress.isFinished,
+            lastUpdate: progress.lastUpdate
+          }
+        : null,
+      tracks: tracks.map((track) => ({
+        index: track.index,
+        ino: track.ino,
+        startOffset: track.startOffset,
+        duration: track.duration,
+        mimeType: track.mimeType,
+        ext: track.metadata?.ext || null,
+        contentUrl: track.contentUrl
+      }))
+    })
+  }
+
+  /**
    * DELETE: /api/items/:id
    * Delete library item. Will delete from database and file system if hard delete is requested.
    * Optional query params:

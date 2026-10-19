@@ -299,4 +299,103 @@ describe('LibraryItemController', () => {
       expect(fakeRes.sendStatus.calledWith(403)).to.be.true
     })
   })
+
+  describe('getTracks', () => {
+    let bookItemId
+    let podcastItemId
+    let episodeId
+
+    const audioFile = (index, ino, duration, extra = {}) => ({
+      index,
+      ino,
+      duration,
+      mimeType: 'audio/mp4',
+      metadata: { filename: `part${index}.m4b`, ext: '.m4b', path: `/test/book/part${index}.m4b`, size: 1000 },
+      chapters: [{ id: 0, start: 0, end: duration, title: 'Embedded chapter' }],
+      metaTags: { tagTitle: 'Long tag value' },
+      ...extra
+    })
+
+    beforeEach(async () => {
+      const library = await Database.libraryModel.create({ name: 'Books', mediaType: 'book' })
+      const folder = await Database.libraryFolderModel.create({ path: '/test', libraryId: library.id })
+      const book = await Database.bookModel.create({
+        title: 'Long Book',
+        audioFiles: [audioFile(1, '101', 100), audioFile(2, '102', 50, { exclude: true }), audioFile(3, '103', 200)],
+        chapters: Array.from({ length: 160 }, (_, i) => ({ id: i, start: i, end: i + 1, title: `Chapter ${i + 1}` })),
+        tags: [],
+        narrators: [],
+        genres: []
+      })
+      const author = await Database.authorModel.create({ name: 'Some Author', libraryId: library.id })
+      await Database.bookAuthorModel.create({ bookId: book.id, authorId: author.id })
+      const item = await Database.libraryItemModel.create({ libraryFiles: [], mediaId: book.id, mediaType: 'book', libraryId: library.id, libraryFolderId: folder.id })
+      bookItemId = item.id
+
+      const podcastLibrary = await Database.libraryModel.create({ name: 'Podcasts', mediaType: 'podcast' })
+      const podcastFolder = await Database.libraryFolderModel.create({ path: '/podcasts', libraryId: podcastLibrary.id })
+      const podcast = await Database.podcastModel.create({ title: 'A Podcast', author: 'Host', tags: [], genres: [] })
+      const episode = await Database.podcastEpisodeModel.create({ podcastId: podcast.id, title: 'Episode 1', audioFile: audioFile(1, '201', 300), chapters: [] })
+      episodeId = episode.id
+      const podcastItem = await Database.libraryItemModel.create({ libraryFiles: [], mediaId: podcast.id, mediaType: 'podcast', libraryId: podcastLibrary.id, libraryFolderId: podcastFolder.id })
+      podcastItemId = podcastItem.id
+    })
+
+    const fakeUser = (progress = null) => ({ getOldMediaProgress: sinon.stub().returns(progress) })
+    const fakeRes = () => ({ json: sinon.spy(), sendStatus: sinon.spy(), status: sinon.stub().returnsThis(), send: sinon.spy() })
+
+    it('returns only the tracks, offsets and progress for a book', async () => {
+      const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
+      const progress = { currentTime: 120, duration: 300, isFinished: false, lastUpdate: 1234, ebookProgress: 0 }
+      const req = { libraryItem, query: {}, user: fakeUser(progress) }
+      const res = fakeRes()
+
+      await LibraryItemController.getTracks.bind(apiRouter)(req, res)
+
+      expect(res.json.calledOnce).to.be.true
+      const payload = res.json.firstCall.args[0]
+      expect(payload).to.deep.include({ id: bookItemId, mediaType: 'book', episodeId: null, title: 'Long Book', author: 'Some Author' })
+      expect(payload.progress).to.deep.equal({ currentTime: 120, duration: 300, isFinished: false, lastUpdate: 1234 })
+      expect(payload.tracks).to.deep.equal([
+        { index: 1, ino: '101', startOffset: 0, duration: 100, mimeType: 'audio/mp4', ext: '.m4b', contentUrl: `/api/items/${bookItemId}/file/101` },
+        { index: 3, ino: '103', startOffset: 100, duration: 200, mimeType: 'audio/mp4', ext: '.m4b', contentUrl: `/api/items/${bookItemId}/file/103` }
+      ])
+      expect(req.user.getOldMediaProgress.calledWith(bookItemId, null)).to.be.true
+      // Chapters, file metadata and tags are left out, which keeps the response small
+      expect(JSON.stringify(payload)).to.not.include('Chapter')
+      expect(JSON.stringify(payload)).to.not.include('Long tag value')
+    })
+
+    it('returns null progress when the book was never started', async () => {
+      const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
+      const res = fakeRes()
+      await LibraryItemController.getTracks.bind(apiRouter)({ libraryItem, query: {}, user: fakeUser(null) }, res)
+      expect(res.json.firstCall.args[0].progress).to.equal(null)
+    })
+
+    it('returns the episode track for a podcast episode', async () => {
+      const libraryItem = await Database.libraryItemModel.getExpandedById(podcastItemId)
+      const req = { libraryItem, query: { episode: episodeId }, user: fakeUser(null) }
+      const res = fakeRes()
+
+      await LibraryItemController.getTracks.bind(apiRouter)(req, res)
+
+      const payload = res.json.firstCall.args[0]
+      expect(payload).to.deep.include({ id: podcastItemId, mediaType: 'podcast', episodeId, title: 'Episode 1', author: 'Host', duration: 300 })
+      expect(payload.tracks).to.deep.equal([{ index: 1, ino: '201', startOffset: 0, duration: 300, mimeType: 'audio/mp4', ext: '.m4b', contentUrl: `/api/items/${podcastItemId}/file/201` }])
+      expect(req.user.getOldMediaProgress.calledWith(podcastItemId, episodeId)).to.be.true
+    })
+
+    it('requires a valid episode for podcasts', async () => {
+      const libraryItem = await Database.libraryItemModel.getExpandedById(podcastItemId)
+
+      const missing = fakeRes()
+      await LibraryItemController.getTracks.bind(apiRouter)({ libraryItem, query: {}, user: fakeUser() }, missing)
+      expect(missing.status.calledWith(400)).to.be.true
+
+      const unknown = fakeRes()
+      await LibraryItemController.getTracks.bind(apiRouter)({ libraryItem, query: { episode: 'nope' }, user: fakeUser() }, unknown)
+      expect(unknown.sendStatus.calledWith(404)).to.be.true
+    })
+  })
 })
